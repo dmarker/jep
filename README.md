@@ -32,6 +32,9 @@
     code:
       [D49158][60]
       [2669fb7][61]
+    bugs:
+      [185619][70]
+      [260973][71]
 
   -->
 [10]: https://www.freebsd.org
@@ -66,6 +69,9 @@
 
 [60]: https://reviews.freebsd.org/D49158
 [61]: https://github.com/NetworkConfiguration/dhcpcd/commit/2669fb715fadfd3cac931aec787c16c0d87be9a2
+
+[70]: https://bugs.freebsd.org/bugzilla/show_bug.cgi?id=185619
+[71]: https://bugs.freebsd.org/bugzilla/show_bug.cgi?id=260973
 
 # JEP (jailed ethernet pairs)
 
@@ -307,6 +313,15 @@ name doesn't already exist in the vnet where its going.
 
 In this case things went so bad the interfaces weren't removed by jail destruction
 and a reboot was required!
+
+I am not the first to notice renaming interfaces in jails can confuse the system:
+* [185619][70] Name conflict not checked when a child vnet goes away and returns its interface(s) back to the parent
+* [260973][71] pf: firewall rules stop matching when vnet jails share interface names with the host
+
+Ultimately this is why we still require the naming convention for the end of the
+epair that comes out of the jail.
+As long as all the identically named interfaces stay and die with their jail there
+is no issue (unless you use pf, sorry).
 
 ## dhcpcd
 
