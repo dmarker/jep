@@ -24,22 +24,19 @@
 
 #include <assert.h>
 #include <err.h>
-#include <errno.h>
 #include <ifaddrs.h>
-#include <net/if.h>
 #include <net/if_bridgevar.h>
 #include <net/if_dl.h>
-#include <stdint.h>
 #include <stdio.h>
 #include <string.h>
 #include <sys/ioctl.h>
-#include <unistd.h>
 
 #include "jep.h"
 
 /*
  * This file is just implementing a tiny subset of ifconfig(8), just enough
  * to do everything we need without resorting to system(3).
+ * Most of these functions are just assert, runtime check, then ioctl.
  */
 
 
@@ -65,7 +62,7 @@ if_epair_create(ifctx ctx, char result[IFNAMSIZ])
 		warn("%s: ioctl(...SIOCIFCREATE2...)", __func__);
 		return (NULL);
 	}
-	strncpy(result, ifr.ifr_name, IFNAMSIZ);
+	strlcpy(result, ifr.ifr_name, IFNAMSIZ);
 	return (result);
 }
 
@@ -86,7 +83,6 @@ if_epair_destroy(ifctx ctx, const char *ifname)
 	}
 
 	strlcpy(ifr.ifr_name, ifname, IFNAMSIZ);
-
 	if ((rc = ioctl(ctx, SIOCIFDESTROY, &ifr)) != 0) warn(
 		"%s: ioctl(...SIOCIFDESTROY...)", __func__
 	);
@@ -98,7 +94,9 @@ int
 if_vmove(ifctx ctx, const char *ifname, int jid)
 {
 	int rc = 0;
-	struct ifreq ifr = {0};
+	struct ifreq ifr = {
+		.ifr_jid = jid
+	};
 
 	assert(ifname != NULL && jid >= 0);
 	if (strlen(ifname) >= IFNAMSIZ) warnc(
@@ -109,8 +107,7 @@ if_vmove(ifctx ctx, const char *ifname, int jid)
 		return (-1);
 	}
 
-	strcpy(ifr.ifr_name, ifname); /* just have to fill in which one */
-	ifr.ifr_jid = jid;
+	strlcpy(ifr.ifr_name, ifname, sizeof(ifr.ifr_name));
 	if ((rc = ioctl(ctx, SIOCSIFRVNET, &ifr)) != 0) warn(
 		"%s: ioctl(...SIOCSIFRVNET...)", __func__
 	);
@@ -121,7 +118,9 @@ int
 if_rename(ifctx ctx, const char *ifname, const char *name)
 {
 	int rc = 0;
-	struct ifreq ifr = {0};
+	struct ifreq ifr = {
+		.ifr_data = (caddr_t)name
+	};
 
 	assert(ifname != NULL && name != NULL);
 	if (strlen(ifname) >= IFNAMSIZ) warnc(
@@ -135,18 +134,14 @@ if_rename(ifctx ctx, const char *ifname, const char *name)
 		return (-1);
 	}
 
-	strcpy(ifr.ifr_name, ifname);
-	ifr.ifr_data = (caddr_t)name;
+	strlcpy(ifr.ifr_name, ifname, sizeof(ifr.ifr_name));
 	if ((rc = ioctl(ctx, SIOCSIFNAME, &ifr)) != 0) warn(
 		"%s: ioctl(...SIOCSIFNAME...)", __func__
 	);
 	return (rc);
 }
 
-/* have to use getifaddrs or send NGM_EIFACE_GET_IFADDRS and figure out how to
- * parse what is sent back. That should be faster... but how may interfaces will
- * we have in a jail? Just don't think its worth worrying aobut that.
- *
+/*
  * If there is a failure, this function warns and returns NULL.
  * If the MAC for `ifname` is not found `mac` is set to the empty string.
  * But found or not, without error `mac` is returned.
@@ -199,16 +194,29 @@ if_getmac(ifctx ctx, const char *ifname, char mac[LLNAMSIZ])
  * that ifconfig(8) returns same as if_getmac returns.
  * 
  * Planning to pipe to another utility...
+ *
+ * Originally I used link_addr(3) for the mac but really its just easier
+ * to scanf(3) and check the right number of conversions occured.
  */
 const char *
 if_setmac(ifctx ctx, const char *ifname, char mac[LLNAMSIZ])
 {
-	struct sockaddr_dl	sdl = {0};
-	struct ifreq		ifr = {0};
-	struct sockaddr		*sa = &ifr.ifr_addr;
-	char			temp[LLNAMSIZ + 1] = { ':', '\0', };
-	unsigned char		*bmac;
-	int			rc = 0;
+	int		rc = 0;
+	struct ifreq	ifr = {
+		.ifr_addr = {
+			.sa_family = AF_LINK,
+			.sa_len = ETHER_ADDR_LEN, /* binary mac size */
+		}
+	};
+	unsigned char	*bmac = (unsigned char *)(&ifr.ifr_addr.sa_data);
+
+#	define		BMAC_SCAN_ARGS \
+			mac, "%hhx:%hhx:%hhx:%hhx:%hhx:%hhx", \
+			&bmac[0], &bmac[1], &bmac[2], \
+			&bmac[3], &bmac[4], &bmac[5]
+#	define		BMAC_PRINT_ARGS \
+			mac, "%02x:%02x:%02x:%02x:%02x:%02x", \
+			bmac[0], bmac[1], bmac[2], bmac[3], bmac[4], bmac[5]
 
 	assert(ifname != NULL && mac != NULL);
 	if (strlen(ifname) >= IFNAMSIZ) warnc(
@@ -217,37 +225,24 @@ if_setmac(ifctx ctx, const char *ifname, char mac[LLNAMSIZ])
 	if (strlen(mac) >= LLNAMSIZ) warnc(
 		EINVAL, "mac=\"%s\" too long", mac
 	), rc++;
+	if (sscanf(BMAC_SCAN_ARGS) != 6) warnc(
+		EINVAL, "mac=\"%s\" invalid", mac
+	), rc++;
 	if (rc) {
 		errno = EINVAL;
 		return (NULL);
 	}
 
-	strcat(temp, mac);
-	sdl.sdl_len = sizeof(sdl);
-	link_addr(temp, &sdl);
-	if (sdl.sdl_alen > sizeof(sa->sa_data)) {
-		warnc(EINVAL, "%s, link_addr(%s, ...)", __func__, temp);
-		errno = EINVAL;
-		return (NULL);
-	}
-	sa->sa_family = AF_LINK;
-	sa->sa_len = sdl.sdl_alen;
-	bcopy(LLADDR(&sdl), sa->sa_data, sdl.sdl_alen);
-	strcpy(ifr.ifr_name, ifname);
-
+	strlcpy(ifr.ifr_name, ifname, sizeof(ifr.ifr_name));
 	rc = ioctl(ctx, SIOCSIFLLADDR, &ifr);
 	if (rc != 0) {
 		warn("%s: ioctl(...SIOCSIFLLADDR...)", __func__);
 		return (NULL);
 	}
-	bmac = (unsigned char *)sa->sa_data;
-	rc = sprintf(
-		mac,
-		"%02x:%02x:%02x:%02x:%02x:%02x",
-		bmac[0], bmac[1], bmac[2], bmac[3], bmac[4], bmac[5]
-	);
+	rc = sprintf(BMAC_PRINT_ARGS); /* normalize */
 	assert(rc == LLNAMLEN);
-
+#	undef BMAC_SCAN_ARGS
+#	undef BMAC_PRINT_ARGS
 
 	return (mac);
 }
@@ -275,14 +270,8 @@ if_addm(ifctx ctx, const char *ifname, const char *brname)
 		return (-1);
 	}
 
-	/* ok which is this? */
 	strlcpy(req.ifbr_ifsname, ifname, sizeof(req.ifbr_ifsname));
-	//strlcpy(req.ifbr_ifsname, brname, sizeof(req.ifbr_ifsname));
-
-	/* do I want the bridge or the interface here? */
 	strlcpy(ifd.ifd_name, brname, sizeof(ifd.ifd_name));
-	//strlcpy(ifd.ifd_name, ifname, sizeof(ifd.ifd_name));
-
 	if ((rc = ioctl(ctx, SIOCSDRVSPEC, &ifd)) != 0) warn(
 		"%s: ioctl(...SIOCSDRVSPEC...)", __func__
 	);
@@ -300,12 +289,10 @@ getifflags(ifctx ctx, const char *ifname, uint32_t *flags)
 	assert(strlen(ifname) < IFNAMSIZ);
 
 	strlcpy(ifr.ifr_name, ifname, sizeof(ifr.ifr_name));
-
 	if ((rc = ioctl(ctx, SIOCGIFFLAGS, &ifr)) != 0) {
 		warn("%s: ioctl(...SIOCGIFFLAGS...)", __func__);
 		return (rc);
 	}
-
 	*flags = ((ifr.ifr_flags & 0xffff) | (ifr.ifr_flagshigh << 16));
 	return (rc);
 }
@@ -314,15 +301,16 @@ static int
 setifflags(ifctx ctx, const char *ifname, uint32_t flags)
 {
 	int rc = 0;
-	struct ifreq ifr = {0};
+	struct ifreq ifr = {
+		.ifr_flags = flags & 0xffff,
+		.ifr_flagshigh = flags >> 16
+	};
 
 	assert(ctx >= 0);
 	assert(ifname != NULL);
 	assert(strlen(ifname) < IFNAMSIZ);
 
 	strlcpy(ifr.ifr_name, ifname, sizeof(ifr.ifr_name));
-	ifr.ifr_flags = flags & 0xffff;
-	ifr.ifr_flagshigh = flags >> 16;
 	if ((rc = ioctl(ctx, SIOCSIFFLAGS, &ifr)) != 0) warn(
 		"%s: ioctl(...SIOCSIFFLAGS...)", __func__
 	);
@@ -347,8 +335,5 @@ if_up(ifctx ctx, const char *ifname)
 
 	if ((rc = getifflags(ctx, ifname, &flags)) != 0)
 		return (rc);
-
-	flags |= IFF_UP;
-	return setifflags(ctx, ifname, flags);
+	return setifflags(ctx, ifname, flags | IFF_UP);
 }
-

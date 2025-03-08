@@ -24,14 +24,11 @@
 
 #include <assert.h>
 #include <err.h>
-#include <net/if.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/param.h>
 #include <sys/jail.h>
-#include <sys/types.h>
-#include <sys/socket.h>
 #include <sys/wait.h>
 #include <jail.h>
 #include <unistd.h>
@@ -269,6 +266,7 @@ parent(void)
 	(void) close(G.ipc);
 	(void) close(G.ifc);
 
+	/* XXX this may change when I write something to consume it ... */
 	(void) fprintf(stdout, "{\"%s\": \"%s\"}\n", G.jail, G.mac);
 
 out:
@@ -280,10 +278,7 @@ out:
 		return EX_OSERR;
 
 	assert(WIFEXITED(status));
-	if (WEXITSTATUS(status) != 0)
-		return WEXITSTATUS(status);
-
-	return (0);
+	return WEXITSTATUS(status);
 }
 
 
@@ -321,6 +316,10 @@ main(int argc, char **argv)
 	/*
 	 * User may have given us numeric ID so ensure we have name for later.
 	 * This name is malloc()ed but not worth worrying about free()ing.
+	 *
+	 * XXX still not sure I want to print jail name, we have that in
+	 *     jail.conf(5) anyway so any utility that uses mac probably
+	 *     doesn't need this...
 	 */
 	if ((G.jail = jail_getname(G.jid)) == NULL) errx(
 		ERREXIT, "%s", jail_errmsg
